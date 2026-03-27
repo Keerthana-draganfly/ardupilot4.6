@@ -285,9 +285,12 @@ void AP_OpenDroneID::send_static_out()
     }
 
     // we need to notify user if we lost system msg with operator location
-    if (now_ms - last_system_ms > 5000 && now_ms - last_lost_operator_msg_ms > 5000) {
-        last_lost_operator_msg_ms = now_ms;
-        GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "ODID: lost operator location");
+    const uint32_t gcs_last_seen = gcs().sysid_myggcs_last_seen_time_ms();
+    if(gcs_last_seen>10000) {
+        if ((now_ms-last_system_ms) > 5000 && (now_ms-last_lost_operator_msg_ms) > 5000) {
+            last_lost_operator_msg_ms = now_ms;
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "ODID: lost operator location");
+        }  
     }
     
     const uint32_t msg_spacing_ms = _mavlink_static_period_ms / 4;
@@ -343,10 +346,17 @@ void AP_OpenDroneID::send_location_message()
     const bool got_bad_gps_fix = (gps_status < AP_GPS::GPS_Status::GPS_OK_FIX_3D);
     const bool armed = hal.util->get_soft_armed();
 
+    if(gps_status==AP_GPS::GPS_Status::NO_GPS)
+        return;
+
     Location current_location;
     if (!ahrs.get_location(current_location)) {
-        return;
+        //return;
+        current_location.lat=1;
+        current_location.lng=0;
+        current_location.alt=0;
     }
+
     uint8_t uav_status = hal.util->get_soft_armed()? MAV_ODID_STATUS_AIRBORNE : MAV_ODID_STATUS_GROUND;
 #if HAL_PARACHUTE_ENABLED
     // set emergency status if chute is released
@@ -378,12 +388,18 @@ void AP_OpenDroneID::send_location_message()
         uav_status = MAV_ODID_STATUS_EMERGENCY;
     }
 
+    const float speed_horizontal = create_speed_horizontal(ahrs.groundspeed());
     float direction = ODID_INV_DIR;
     if (!got_bad_gps_fix) {
-        direction = wrap_360(degrees(ahrs.groundspeed_vector().angle())); // heading (degrees)
+        if(speed_horizontal>0.7f) {
+            direction = wrap_360(degrees(ahrs.groundspeed_vector().angle())); // heading (degrees)
+        }
+        else {
+            direction=ahrs.get_yaw()*180/M_PI;
+            if(direction<0)
+                direction +=360;
+        }
     }
-
-    const float speed_horizontal = create_speed_horizontal(ahrs.groundspeed());
 
     Vector3f velNED;
     UNUSED_RESULT(ahrs.get_velocity_NED(velNED));
@@ -395,6 +411,8 @@ void AP_OpenDroneID::send_location_message()
         latitude = current_location.lat;
         longitude = current_location.lng;
     }
+    if(latitude==0 && longitude==0) //don't send 0,0, to allow arming with no GPS lock
+        latitude=1;
 
     // altitude referenced against 1013.2mb
     const float base_press_mbar = 1013.2;
@@ -805,3 +823,4 @@ AP_OpenDroneID &opendroneid()
 
 }
 #endif //AP_OPENDRONEID_ENABLED
+

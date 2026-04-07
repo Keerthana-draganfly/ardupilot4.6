@@ -155,6 +155,9 @@ function mavlink_msgs.encode(msgname, message)
       packedIndex = packedIndex + 1
     end
   end
+  if message_map.crc_extra ~= nil and message_map.min_len ~= nil and message_map.max_len ~=nil then
+	  return message_map.id, string.pack(packString, table.unpack(packedTable)), message_map.crc_extra, message_map.min_len, message_map.max_len
+  end
   return message_map.id, string.pack(packString, table.unpack(packedTable))
 end
 

@@ -1,0 +1,239 @@
+diff --git a/libraries/AP_Scripting/AP_Scripting.cpp b/libraries/AP_Scripting/AP_Scripting.cpp
+index 86dab106f3..885ca7f839 100644
+--- a/libraries/AP_Scripting/AP_Scripting.cpp
++++ b/libraries/AP_Scripting/AP_Scripting.cpp
+@@ -480,6 +480,22 @@ bool AP_Scripting::is_handling_command(uint16_t cmd_id)
+ 
+     return false;
+ }
++
++bool AP_Scripting::is_hooked_message_request(uint32_t msgid)
++{
++    WITH_SEMAPHORE(mavlink_req_message_hook_list_sem);
++
++    // Look in linked list to see if id is registered
++    if (mavlink_req_message_hook_list != nullptr) {
++        for (req_message_hook_list *item = mavlink_req_message_hook_list; item; item = item->next) {
++            if (item->msgid == msgid) {
++                return true;
++            }
++        }
++    }
++
++    return false;
++}
+ #endif // HAL_GCS_ENABLED
+ 
+ // Update called at 1Hz from AP_Vehicle
+diff --git a/libraries/AP_Scripting/AP_Scripting.h b/libraries/AP_Scripting/AP_Scripting.h
+index f7139775c0..741a125e99 100644
+--- a/libraries/AP_Scripting/AP_Scripting.h
++++ b/libraries/AP_Scripting/AP_Scripting.h
+@@ -59,6 +59,7 @@ public:
+ 
+     // Check if command ID is blocked
+     bool is_handling_command(uint16_t cmd_id);
++    bool is_hooked_message_request(uint32_t msgid);
+ #endif
+ 
+     static AP_Scripting * get_singleton(void) { return _singleton; }
+@@ -144,6 +145,14 @@ public:
+     command_block_list *mavlink_command_block_list;
+     HAL_Semaphore mavlink_command_block_list_sem;
+ 
++    struct req_message_hook_list {
++        uint32_t msgid;
++        req_message_hook_list *next;
++    };
++
++    req_message_hook_list *mavlink_req_message_hook_list;
++    HAL_Semaphore mavlink_req_message_hook_list_sem;
++
+ private:
+ 
+     bool repl_start(void);
+diff --git a/libraries/AP_Scripting/generator/description/bindings.desc b/libraries/AP_Scripting/generator/description/bindings.desc
+index d5e867f826..11a1708114 100644
+--- a/libraries/AP_Scripting/generator/description/bindings.desc
++++ b/libraries/AP_Scripting/generator/description/bindings.desc
+@@ -873,6 +873,7 @@ singleton mavlink manual register_rx_msgid lua_mavlink_register_rx_msgid 1
+ singleton mavlink manual send_chan lua_mavlink_send_chan 3
+ singleton mavlink manual receive_chan lua_mavlink_receive_chan 0
+ singleton mavlink manual block_command lua_mavlink_block_command 1
++singleton mavlink manual hook_message_request lua_mavlink_hook_message_request 1
+ 
+ include AC_Fence/AC_Fence.h depends AP_FENCE_ENABLED
+ include AC_Fence/AC_Fence_config.h
+diff --git a/libraries/AP_Scripting/lua_bindings.cpp b/libraries/AP_Scripting/lua_bindings.cpp
+index f4cf9bb307..45246ac81c 100644
+--- a/libraries/AP_Scripting/lua_bindings.cpp
++++ b/libraries/AP_Scripting/lua_bindings.cpp
+@@ -153,11 +153,24 @@ int lua_mavlink_send_chan(lua_State *L) {
+     // Allow : and . access
+     const int arg_offset = (luaL_testudata(L, 1, "mavlink") != NULL) ? 1 : 0;
+ 
+-    binding_argcheck(L, 3+arg_offset);
++    const int arg_count = lua_gettop(L);
++    if (arg_count != 4 && arg_count !=7) {
++        lua_pushboolean(L, false);
++        return luaL_argerror(L, arg_count, "send_chan requires 4 or 7 arguments");
++    }
+     
+     const mavlink_channel_t chan = (mavlink_channel_t)get_uint32(L, 1+arg_offset, 0, MAVLINK_COMM_NUM_BUFFERS - 1);
+ 
+     const uint32_t msgid = get_uint32(L, 2+arg_offset, 0, (1 << 24) - 1);
++    uint8_t crc_extra;
++    uint8_t min_msg_len;
++    uint8_t max_msg_len;
++    if(arg_count==7)
++        {
++        crc_extra = get_uint8_t(L,4+arg_offset);
++        min_msg_len=get_uint8_t(L,5+arg_offset);
++        max_msg_len=get_uint8_t(L,6+arg_offset);
++        }
+ 
+     const char *packet = luaL_checkstring(L, 3+arg_offset);
+ 
+@@ -166,22 +179,40 @@ int lua_mavlink_send_chan(lua_State *L) {
+     //        are known at compile time. This is fine as a starting point as this is symmetrical to the
+     //        decoding side of the scripting support
+     const mavlink_msg_entry_t *entry = mavlink_get_msg_entry(msgid);
+-    if (entry == nullptr) {
++    /*if (entry == nullptr) {
+         return luaL_error(L, "Unknown MAVLink message ID (%d)", msgid);
+-    }
++    }*/
+ 
+     WITH_SEMAPHORE(comm_chan_lock(chan));
+-    if (comm_get_txspace(chan) >= (GCS_MAVLINK::packet_overhead_chan(chan) + entry->max_msg_len)) {
+-        _mav_finalize_message_chan_send(chan,
+-                                        entry->msgid,
+-                                        packet,
+-                                        entry->min_msg_len,
+-                                        entry->max_msg_len,
+-                                        entry->crc_extra);
+-
+-        lua_pushboolean(L, true);
+-    } else {
+-        lua_pushboolean(L, false);
++    if(arg_count==4)
++    {
++        if (entry != nullptr  && comm_get_txspace(chan) >= (GCS_MAVLINK::packet_overhead_chan(chan) + entry->max_msg_len)) {
++            _mav_finalize_message_chan_send(chan,
++                                            entry->msgid,
++                                            packet,
++                                            entry->min_msg_len,
++                                            entry->max_msg_len,
++                                            entry->crc_extra);
++
++            lua_pushboolean(L, true);
++        } else {
++            lua_pushboolean(L, false);
++        }
++    }
++    else
++    {
++        if (comm_get_txspace(chan) >= (GCS_MAVLINK::packet_overhead_chan(chan) + max_msg_len)) {
++            _mav_finalize_message_chan_send(chan,
++                                            msgid,
++                                            packet,
++                                            min_msg_len,
++                                            max_msg_len,
++                                            crc_extra);
++
++            lua_pushboolean(L, true);
++        } else {
++            lua_pushboolean(L, false);
++        }       
+     }
+ 
+     return 1;
+@@ -219,6 +250,39 @@ int lua_mavlink_block_command(lua_State *L) {
+     lua_pushboolean(L, true);
+     return 1;
+ }
++
++int lua_mavlink_hook_message_request(lua_State *L) {
++
++    // Allow : and . access
++    const int arg_offset = (luaL_testudata(L, 1, "mavlink") != NULL) ? 1 : 0;
++
++    binding_argcheck(L, 1+arg_offset);
++
++    const uint32_t msgid = get_uint32(L, 1+arg_offset,0,(1<<24)-1);
++
++    // Check if ID is already registered
++    if (AP::scripting()->is_hooked_message_request(msgid)) {
++        lua_pushboolean(L, true);
++        return 1;
++    }
++
++    // Add new list item
++    AP_Scripting::req_message_hook_list *new_item = new AP_Scripting::req_message_hook_list;
++    if (new_item == nullptr) {
++        lua_pushboolean(L, false);
++        return 1;
++    }
++    new_item->msgid = msgid;
++
++    {
++        WITH_SEMAPHORE(AP::scripting()->mavlink_req_message_hook_list_sem);
++        new_item->next = AP::scripting()->mavlink_req_message_hook_list;
++        AP::scripting()->mavlink_req_message_hook_list = new_item;
++    }
++
++    lua_pushboolean(L, true);
++    return 1;
++}
+ #endif // HAL_GCS_ENABLED
+ 
+ #if AP_MISSION_ENABLED
+diff --git a/libraries/AP_Scripting/lua_bindings.h b/libraries/AP_Scripting/lua_bindings.h
+index add40faa0a..389f3bd7b2 100644
+--- a/libraries/AP_Scripting/lua_bindings.h
++++ b/libraries/AP_Scripting/lua_bindings.h
+@@ -25,5 +25,6 @@ int lua_mavlink_receive_chan(lua_State *L);
+ int lua_mavlink_register_rx_msgid(lua_State *L);
+ int lua_mavlink_send_chan(lua_State *L);
+ int lua_mavlink_block_command(lua_State *L);
++int lua_mavlink_hook_message_request(lua_State *L);
+ int lua_print(lua_State *L);
+ int lua_range_finder_handle_script_msg(lua_State *L);
+diff --git a/libraries/GCS_MAVLink/GCS_Common.cpp b/libraries/GCS_MAVLink/GCS_Common.cpp
+index c05717902c..b82d0b36ea 100644
+--- a/libraries/GCS_MAVLink/GCS_Common.cpp
++++ b/libraries/GCS_MAVLink/GCS_Common.cpp
+@@ -4963,6 +4963,16 @@ void GCS_MAVLINK::handle_command_long(const mavlink_message_t &msg)
+         // Scripting has registered to receive this command, do not procces it internaly
+         return;
+     }
++    switch(packet.command)
++    {
++        case MAV_CMD_SET_MESSAGE_INTERVAL:
++        case MAV_CMD_GET_MESSAGE_INTERVAL:
++        case MAV_CMD_REQUEST_MESSAGE:
++            if(scripting != nullptr && scripting->is_hooked_message_request((uint32_t)packet.param1))
++                return;
++        default:
++            break;
++    }
+ #endif
+ 
+     hal.util->persistent_data.last_mavlink_cmd = packet.command;
+@@ -5356,6 +5366,16 @@ void GCS_MAVLINK::handle_command_int(const mavlink_message_t &msg)
+         // Scripting has registered to receive this command, do not procces it internaly
+         return;
+     }
++    switch(packet.command)
++    {
++        case MAV_CMD_SET_MESSAGE_INTERVAL:
++        case MAV_CMD_GET_MESSAGE_INTERVAL:
++        case MAV_CMD_REQUEST_MESSAGE:
++            if(scripting != nullptr && scripting->is_hooked_message_request((uint32_t)packet.param1))
++                return;
++        default:
++            break;
++    }
+ #endif
+ 
+     hal.util->persistent_data.last_mavlink_cmd = packet.command;

@@ -402,10 +402,10 @@ bool AP_Arming::logging_checks(bool report)
             check_failed(ARMING_CHECK_LOGGING, report, "No SD card");
             return false;
         }
-        if (AP::logger().in_log_download()) {
+        /*if (AP::logger().in_log_download()) {
             check_failed(ARMING_CHECK_LOGGING, report, "Downloading logs");
             return false;
-        }
+        }*/
     }
     return true;
 }
